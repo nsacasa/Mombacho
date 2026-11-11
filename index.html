@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timelapse Volcán Mombacho</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root{
+  --bg:#f6f7f5; --panel:#ffffff; --text:#1d2420; --muted:#5d6862; --line:#d9dfdb;
+  --accent:#2f7d52; --veg:#2f9e44; --dry:#e0a800; --bare:#c2410c; --cloud:#7c8ea3;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121614; --panel:#1b211e; --text:#e6ece8; --muted:#9aa7a0; --line:#2d3631;
+    --accent:#5cc28a; --veg:#51cf66; --dry:#ffd43b; --bare:#ff8a4c; --cloud:#a5b4c4;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121614; --panel:#1b211e; --text:#e6ece8; --muted:#9aa7a0; --line:#2d3631;
+  --accent:#5cc28a; --veg:#51cf66; --dry:#ffd43b; --bare:#ff8a4c; --cloud:#a5b4c4;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:16px 16px 4px;max-width:1200px;margin:0 auto}
+h1{font-size:1.35rem;margin:0 0 4px}
+header p{margin:0;color:var(--muted);font-size:.9rem}
+main{max-width:1200px;margin:0 auto;padding:12px 16px 32px;display:grid;gap:16px;grid-template-columns:minmax(0,1fr) 320px}
+@media (max-width:900px){main{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+#map{height:min(72vh,680px);border-radius:8px;background:#0b0f0d}
+.controls{display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap}
+.controls input[type=range]{flex:1;min-width:160px;accent-color:var(--accent)}
+button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:7px 12px;font:inherit;cursor:pointer}
+button.secondary{background:transparent;color:var(--text);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:default}
+#dateLabel{font-weight:600;min-width:110px}
+#status{color:var(--muted);font-size:.85rem;margin-top:8px;min-height:1.2em}
+.progress{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:6px}
+.progress>div{height:100%;width:0;background:var(--accent);transition:width .2s}
+h2{font-size:1rem;margin:0 0 8px}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{border:1px solid var(--line);border-radius:8px;padding:8px}
+.stat .v{font-size:1.25rem;font-weight:650}
+.stat .l{font-size:.78rem;color:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:.8rem;color:var(--muted);margin:8px 0}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+label.row{display:flex;justify-content:space-between;gap:8px;font-size:.85rem;margin-top:8px}
+label.row input[type=range]{width:100%;accent-color:var(--accent)}
+.small{font-size:.8rem;color:var(--muted)}
+#chart{width:100%;height:220px;display:block}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th,td{padding:4px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+tr.rej td{color:var(--muted);text-decoration:line-through}
+tr.cur td{background:color-mix(in srgb,var(--accent) 15%,transparent)}
+tr{cursor:pointer}
+.tablewrap{overflow-x:auto;max-height:340px;overflow-y:auto}
+.full{grid-column:1/-1}
+/* Map overlays */
+.date-overlay{background:rgba(0,0,0,.62);color:#fff;font:600 20px/1.2 system-ui,sans-serif;padding:6px 12px;border-radius:6px;pointer-events:none}
+.date-overlay small{display:block;font:400 11px/1.3 system-ui,sans-serif;opacity:.85}
+.compass{width:56px;height:56px;border-radius:50%;background:rgba(20,20,20,.85);display:flex;align-items:center;justify-content:center;pointer-events:none}
+.leaflet-control-scale-line{background:rgba(255,255,255,.85)}
+.leaflet-container .leaflet-control-attribution{font-size:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Volcán Mombacho: timelapse satelital (últimos 7 años)</h1>
+  <p>Imágenes históricas de Esri World Imagery Wayback, ordenadas por fecha de captura. Se descartan automáticamente las fechas con nubes sobre la zona de análisis.</p>
+</header>
+<main>
+  <section class="card">
+    <div id="map" role="img" aria-label="Mapa satelital del volcán Mombacho"></div>
+    <div class="controls">
+      <button id="play" disabled>▶ Reproducir</button>
+      <button id="prev" class="secondary" disabled aria-label="Anterior">◀</button>
+      <input id="slider" type="range" min="0" max="0" value="0" disabled aria-label="Fecha">
+      <button id="next" class="secondary" disabled aria-label="Siguiente">▶</button>
+      <span id="dateLabel">—</span>
+    </div>
+    <div class="controls">
+      <label class="small"><input type="checkbox" id="showMask"> Mostrar clasificación (verde = vegetación, amarillo = seca, naranja = suelo desnudo/derrumbe)</label>
+      <label class="small"><input type="checkbox" id="showRejected"> Incluir fechas descartadas</label>
+      <button id="resetView" class="secondary">Restablecer encuadre</button>
+      <button id="useView" class="secondary">Usar vista actual como zona de análisis</button>
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+    <div id="status">Cargando lista de imágenes…</div>
+  </section>
+
+  <aside class="card">
+    <h2>Fecha seleccionada</h2>
+    <div class="stats">
+      <div class="stat"><div class="v" id="sBare">—</div><div class="l">Suelo desnudo / derrumbe</div></div>
+      <div class="stat"><div class="v" id="sDry">—</div><div class="l">Vegetación seca / estresada</div></div>
+      <div class="stat"><div class="v" id="sAff">—</div><div class="l">Área afectada total (seca + desnuda)</div></div>
+      <div class="stat"><div class="v" id="sDelta">—</div><div class="l">Cambio vs. primera fecha</div></div>
+    </div>
+    <p class="small" id="sMeta"></p>
+
+    <h2 style="margin-top:14px">Umbrales de clasificación</h2>
+    <p class="small">Las imágenes vienen de satélites distintos con colores distintos. Ajusta los umbrales activando “Mostrar clasificación” hasta que coincidan con lo que ves.</p>
+    <label class="row">Tono mínimo de vegetación verde <span id="vHueVeg"></span></label>
+    <input type="range" id="tHueVeg" min="50" max="110" value="72">
+    <label class="row">Tono mínimo de vegetación seca <span id="vHueDry"></span></label>
+    <input type="range" id="tHueDry" min="20" max="70" value="45">
+    <label class="row">Brillo mínimo de nube <span id="vCloudLum"></span></label>
+    <input type="range" id="tCloudLum" min="150" max="250" value="215">
+    <label class="row">Máx. nubes para aceptar una fecha <span id="vMaxCloud"></span></label>
+    <input type="range" id="tMaxCloud" min="0" max="30" value="3">
+  </aside>
+
+  <section class="card full">
+    <h2>Evolución del área afectada</h2>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--bare)"></span>Suelo desnudo / derrumbe (ha)</span>
+      <span><span class="sw" style="background:var(--dry)"></span>Vegetación seca (ha)</span>
+      <span><span class="sw" style="background:var(--text)"></span>Total afectado (ha)</span>
+    </div>
+    <svg id="chart" aria-label="Gráfica de área afectada por fecha"></svg>
+    <div class="controls"><button id="csv" class="secondary" disabled>Descargar CSV</button></div>
+    <div class="tablewrap">
+      <table id="table"><thead><tr>
+        <th>Fecha de captura</th><th>Versión Wayback</th><th>Resolución</th><th>Nubes</th>
+        <th>Desnudo (ha)</th><th>Seca (ha)</th><th>Afectado (ha)</th><th>Estado</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+    <p class="small">
+      <b>Notas.</b> El análisis usa solo color visible (RGB): detecta pérdida de vegetación y suelo expuesto, que es un indicador indirecto.
+      No mide temperatura; para confirmar calentamiento hace falta imagen térmica (por ejemplo, la banda 10 de Landsat 8/9).
+      La fecha mostrada corresponde a la imagen en el centro del encuadre; algunas versiones pueden ser mosaicos de varias fechas.
+      Fuente: Esri, Maxar, Earthstar Geographics y la comunidad de usuarios de SIG (World Imagery Wayback).
+    </p>
+  </section>
+</main>
+
+<script>
+(() => {
+'use strict';
+
+// ---------- Configuration ----------
+const params = new URLSearchParams(location.search);
+const CENTER = [parseFloat(params.get('lat')) || 11.8264, parseFloat(params.get('lon')) || -85.9681]; // Mombacho summit
+const FRAME_KM = parseFloat(params.get('km')) || 2.6;   // width/height of the analysis frame
+const YEARS = parseFloat(params.get('years')) || 7;
+const ANALYSIS_ZOOM = 16;                               // ~2.3 m/px, enough for area estimates
+const CONFIG_URL = 'https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json';
+const TILE_URL = (rel, z, y, x) =>
+  `https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/${rel}/${z}/${y}/${x}`;
+const SINCE = new Date(Date.now() - YEARS * 365.25 * 864e5);
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status'), bar = $('bar');
+const setStatus = (t, p) => { statusEl.textContent = t; if (p != null) bar.style.width = (p * 100).toFixed(1) + '%'; };
+
+function frameBounds(center, km) {
+  const dLat = (km / 2) / 110.574;
+  const dLon = (km / 2) / (111.32 * Math.cos(center[0] * Math.PI / 180));
+  return L.latLngBounds([center[0] - dLat, center[1] - dLon], [center[0] + dLat, center[1] + dLon]);
+}
+let analysisBounds = frameBounds(CENTER, FRAME_KM);
+
+// ---------- Map ----------
+const map = L.map('map', { zoomSnap: 0.25, attributionControl: true, maxZoom: 19 });
+map.fitBounds(analysisBounds);
+L.control.scale({ metric: true, imperial: false, position: 'bottomleft', maxWidth: 160 }).addTo(map);
+
+const Compass = L.Control.extend({
+  options: { position: 'bottomright' },
+  onAdd() {
+    const d = L.DomUtil.create('div', 'compass');
+    d.innerHTML = '<svg width="40" height="40" viewBox="0 0 40 40" aria-label="Norte">' +
+      '<polygon points="20,3 26,20 14,20" fill="#e8553f"/><polygon points="20,37 26,20 14,20" fill="#f2f2f2"/>' +
+      '<text x="20" y="13.5" font-size="7" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui">N</text></svg>';
+    return d;
+  }
+});
+new Compass().addTo(map);
+
+const DateControl = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd() { this._d = L.DomUtil.create('div', 'date-overlay'); this._d.textContent = '—'; return this._d; },
+  set(html) { this._d.innerHTML = html; }
+});
+const dateCtl = new DateControl().addTo(map);
+
+let frameRect = L.rectangle(analysisBounds, { color: '#ffd43b', weight: 1.5, fill: false, dashArray: '5 5' }).addTo(map);
+L.circleMarker(CENTER, { radius: 6, color: '#fff', weight: 2, fillColor: '#2f9e44', fillOpacity: 1 }).addTo(map).bindTooltip('Volcán Mombacho', { permanent: false });
+
+// ---------- Helpers ----------
+const lon2px = (lon, z) => (lon + 180) / 360 * 256 * 2 ** z;
+const lat2px = (lat, z) => {
+  const r = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 256 * 2 ** z;
+};
+const metersPerPx = (lat, z) => 156543.03392 * Math.cos(lat * Math.PI / 180) / 2 ** z;
+
+async function pool(items, n, fn) {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); }
+  }));
+  return out;
+}
+
+async function fetchJSON(url, tries = 3) {
+  for (let t = 0; ; t++) {
+    try { const r = await fetch(url); if (!r.ok) throw new Error(r.status); return await r.json(); }
+    catch (e) { if (t >= tries - 1) throw e; await new Promise(r => setTimeout(r, 500 * 2 ** t)); }
+  }
+}
+
+function fmtDate(d) {
+  return d.toLocaleDateString('es-NI', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+}
+const isoDate = d => d.toISOString().slice(0, 10);
+
+// ---------- Metadata (capture date) ----------
+// The metadata service has one layer per scale; layer = 23 - zoom for the zooms we use.
+async function queryCaptureInfo(rel, lat, lon) {
+  const geom = encodeURIComponent(JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }));
+  const tryLayer = async id => {
+    const url = `${rel.metadataLayerUrl}/${id}/query?f=json&where=1%3D1&outFields=*&returnGeometry=false` +
+      `&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&inSR=4326&geometry=${geom}`;
+    const j = await fetchJSON(url);
+    return j && j.features && j.features[0] ? j.features[0].attributes : null;
+  };
+  const order = [6, 5, 7, 4, 8, 3, 9, 2, 10, 1, 0];
+  for (const id of order) {
+    try { const a = await tryLayer(id); if (a) return a; } catch (e) { /* try next layer */ }
+  }
+  return null;
+}
+
+function parseCapture(a) {
+  if (!a) return null;
+  let date = null;
+  if (a.SRC_DATE2) date = new Date(a.SRC_DATE2);
+  else if (a.SRC_DATE) {
+    const s = String(a.SRC_DATE);
+    date = new Date(Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)));
+  }
+  if (!date || isNaN(date)) return null;
+  return {
+    date,
+    res: a.SRC_RES != null ? +a.SRC_RES : null,
+    provider: a.NICE_DESC || a.SRC_DESC || a.SRC_PROVIDER || '',
+  };
+}
+
+// ---------- Pixel analysis ----------
+async function loadTile(url) {
+  const r = await fetch(url, { mode: 'cors' });
+  if (!r.ok) throw new Error('tile ' + r.status);
+  const b = await r.blob();
+  return await createImageBitmap(b);
+}
+
+async function grabFrame(relNum, bounds, z) {
+  const x0 = lon2px(bounds.getWest(), z), x1 = lon2px(bounds.getEast(), z);
+  const y0 = lat2px(bounds.getNorth(), z), y1 = lat2px(bounds.getSouth(), z);
+  const W = Math.round(x1 - x0), H = Math.round(y1 - y0);
+  const cv = new OffscreenCanvas(W, H), ctx = cv.getContext('2d', { willReadFrequently: true });
+  const jobs = [];
+  for (let ty = Math.floor(y0 / 256); ty <= Math.floor((y1 - 1) / 256); ty++)
+    for (let tx = Math.floor(x0 / 256); tx <= Math.floor((x1 - 1) / 256); tx++) jobs.push([tx, ty]);
+  await pool(jobs, 6, async ([tx, ty]) => {
+    let bmp;
+    for (let t = 0; t < 3 && !bmp; t++) { try { bmp = await loadTile(TILE_URL(relNum, z, ty, tx)); } catch (e) { if (t === 2) throw e; } }
+    ctx.drawImage(bmp, Math.round(tx * 256 - x0), Math.round(ty * 256 - y0));
+  });
+  const data = ctx.getImageData(0, 0, W, H).data;
+  const rgb = new Uint8Array(W * H * 3);
+  for (let i = 0, j = 0; i < data.length; i += 4, j += 3) { rgb[j] = data[i]; rgb[j + 1] = data[i + 1]; rgb[j + 2] = data[i + 2]; }
+  return { W, H, rgb };
+}
+
+// Classes: 0 vegetation, 1 dry/stressed vegetation, 2 bare soil / rock / landslide, 3 cloud, 4 shadow
+function classify(r, g, b, T) {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const lum = (r + g + b) / 3, sat = max ? (max - min) / max : 0;
+  if (lum >= T.cloudLum && sat <= 0.18) return 3;
+  if (lum < 22) return 4;
+  if (sat < 0.1) return 2;                     // gray rock / ash / altered ground
+  let h;
+  const d = max - min;
+  if (max === r) h = 60 * (((g - b) / d) % 6);
+  else if (max === g) h = 60 * ((b - r) / d + 2);
+  else h = 60 * ((r - g) / d + 4);
+  if (h < 0) h += 360;
+  if (h >= T.hueVeg && h <= 190) return 0;
+  if (h >= T.hueDry && h < T.hueVeg) return 1;
+  return 2;
+}
+
+function analyze(frame, T) {
+  const counts = [0, 0, 0, 0, 0];
+  const { rgb } = frame;
+  for (let j = 0; j < rgb.length; j += 3) counts[classify(rgb[j], rgb[j + 1], rgb[j + 2], T)]++;
+  return counts;
+}
+
+const MASK_COLORS = [[47, 158, 68, 150], [255, 212, 59, 190], [255, 110, 40, 200], [120, 150, 190, 170], [0, 0, 0, 0]];
+function maskURL(frame, T) {
+  const { W, H, rgb } = frame;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d'); const img = ctx.createImageData(W, H);
+  for (let j = 0, i = 0; j < rgb.length; j += 3, i += 4) {
+    const c = MASK_COLORS[classify(rgb[j], rgb[j + 1], rgb[j + 2], T)];
+    img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2]; img.data[i + 3] = c[3];
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv.toDataURL();
+}
+
+// ---------- State ----------
+let entries = [];        // all unique captures (sorted)
+let frames = new Map();  // releaseNum -> frame pixels
+let visible = [];        // indices into entries shown in the slider
+let cur = 0, layer = null, maskLayer = null, playTimer = null;
+let analysisOK = true;
+
+function thresholds() {
+  return { hueVeg: +$('tHueVeg').value, hueDry: +$('tHueDry').value, cloudLum: +$('tCloudLum').value, maxCloud: +$('tMaxCloud').value };
+}
+function syncThresholdLabels() {
+  const T = thresholds();
+  $('vHueVeg').textContent = T.hueVeg + '°'; $('vHueDry').textContent = T.hueDry + '°';
+  $('vCloudLum').textContent = T.cloudLum; $('vMaxCloud').textContent = T.maxCloud + ' %';
+}
+
+function recompute() {
+  const T = thresholds();
+  const pxArea = metersPerPx(analysisBounds.getCenter().lat, ANALYSIS_ZOOM) ** 2 / 1e4; // ha per pixel
+  for (const e of entries) {
+    const f = frames.get(e.rel);
+    if (!f) { e.stats = null; e.rejected = false; continue; }
+    const c = analyze(f, T), n = c.reduce((a, b) => a + b, 0);
+    e.stats = {
+      cloudPct: c[3] / n * 100,
+      bareHa: c[2] * pxArea, dryHa: c[1] * pxArea, vegHa: c[0] * pxArea,
+      bareHaRaw: c[2], n,
+    };
+    e.stats.affHa = e.stats.bareHa + e.stats.dryHa;
+    e.rejected = e.stats.cloudPct > T.maxCloud;
+  }
+  const showRej = $('showRejected').checked;
+  const prevRel = visible.length ? entries[visible[cur]].rel : null;
+  visible = entries.map((e, i) => i).filter(i => showRej || !entries[i].rejected);
+  let k = visible.findIndex(i => entries[i].rel === prevRel);
+  cur = k >= 0 ? k : 0;
+  const s = $('slider'); s.max = Math.max(0, visible.length - 1); s.value = cur;
+  const on = visible.length > 0;
+  ['slider', 'play', 'prev', 'next', 'csv'].forEach(id => $(id).disabled = !on);
+  renderTable(); renderChart(); show(cur);
+}
+
+function show(k) {
+  if (!visible.length) { dateCtl.set('Sin imágenes válidas'); return; }
+  cur = Math.max(0, Math.min(visible.length - 1, k));
+  $('slider').value = cur;
+  const e = entries[visible[cur]];
+  const newLayer = L.tileLayer(TILE_URL(e.rel, '{z}', '{y}', '{x}'), {
+    maxZoom: 19, maxNativeZoom: 18,
+    attribution: 'Imágenes: Esri World Imagery Wayback (Esri, Maxar, Earthstar Geographics)',
+  });
+  newLayer.addTo(map);
+  const old = layer; layer = newLayer;
+  if (old) newLayer.once('load', () => map.removeLayer(old)), setTimeout(() => old && map.hasLayer(old) && map.removeLayer(old), 4000);
+  const txt = fmtDate(e.date);
+  $('dateLabel').textContent = isoDate(e.date);
+  dateCtl.set(`${txt}<small>Fuente: ${e.provider || 'Esri Wayback'}${e.res ? ' · ' + e.res + ' m/px' : ''}${e.rejected ? ' · DESCARTADA (nubes)' : ''}</small>`);
+  updateMask();
+  const first = entries[visible[0]];
+  if (e.stats) {
+    $('sBare').textContent = e.stats.bareHa.toFixed(1) + ' ha';
+    $('sDry').textContent = e.stats.dryHa.toFixed(1) + ' ha';
+    $('sAff').textContent = e.stats.affHa.toFixed(1) + ' ha';
+    if (first.stats) {
+      const d = e.stats.affHa - first.stats.affHa;
+      const pct = first.stats.affHa ? d / first.stats.affHa * 100 : 0;
+      $('sDelta').textContent = (d >= 0 ? '+' : '') + d.toFixed(1) + ' ha' + (first.stats.affHa >= 0.05 ? ' (' + (pct >= 0 ? '+' : '') + pct.toFixed(0) + ' %)' : '');
+    }
+    $('sMeta').textContent = `Nubes en la zona: ${e.stats.cloudPct.toFixed(1)} %. Versión Wayback ${e.wayback}.`;
+  } else {
+    ['sBare', 'sDry', 'sAff', 'sDelta'].forEach(id => $(id).textContent = '—');
+    $('sMeta').textContent = analysisOK ? 'Analizando…' : 'Análisis no disponible para esta fecha.';
+  }
+  document.querySelectorAll('#table tbody tr').forEach(tr => tr.classList.toggle('cur', +tr.dataset.i === visible[cur]));
+  highlightChart();
+}
+
+function updateMask() {
+  if (maskLayer) { map.removeLayer(maskLayer); maskLayer = null; }
+  if (!$('showMask').checked || !visible.length) return;
+  const f = frames.get(entries[visible[cur]].rel);
+  if (!f) return;
+  maskLayer = L.imageOverlay(maskURL(f, thresholds()), f.bounds, { opacity: 0.85, interactive: false }).addTo(map);
+}
+
+function renderTable() {
+  const tb = $('table').querySelector('tbody');
+  tb.innerHTML = '';
+  entries.forEach((e, i) => {
+    const tr = document.createElement('tr'); tr.dataset.i = i;
+    if (e.rejected) tr.className = 'rej';
+    const s = e.stats;
+    tr.innerHTML = `<td>${isoDate(e.date)}</td><td>${e.wayback}</td><td>${e.res ? e.res + ' m' : '—'}</td>` +
+      `<td>${s ? s.cloudPct.toFixed(1) + ' %' : '—'}</td><td>${s ? s.bareHa.toFixed(1) : '—'}</td>` +
+      `<td>${s ? s.dryHa.toFixed(1) : '—'}</td><td>${s ? s.affHa.toFixed(1) : '—'}</td>` +
+      `<td>${!s ? (analysisOK ? 'pendiente' : 'sin análisis') : e.rejected ? 'descartada (nubes)' : 'válida'}</td>`;
+    tr.addEventListener('click', () => {
+      if (e.rejected && !$('showRejected').checked) { $('showRejected').checked = true; recompute(); }
+      const k = visible.indexOf(i); if (k >= 0) show(k);
+    });
+    tb.appendChild(tr);
+  });
+}
+
+function renderChart() {
+  const svg = $('chart');
+  const pts = visible.map(i => entries[i]).filter(e => e.stats && !e.rejected);
+  const W = svg.clientWidth || 800, H = 220, P = { l: 44, r: 12, t: 10, b: 28 };
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  if (pts.length < 1) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="currentColor" font-size="13">Sin datos de análisis todavía</text>`; return; }
+  const t0 = +pts[0].date, t1 = Math.max(+pts[pts.length - 1].date, t0 + 864e5);
+  const ymax = Math.max(1, ...pts.map(p => p.stats.affHa)) * 1.1;
+  const X = t => P.l + (t - t0) / (t1 - t0) * (W - P.l - P.r);
+  const Y = v => H - P.b - v / ymax * (H - P.t - P.b);
+  const css = getComputedStyle(document.documentElement);
+  const col = n => css.getPropertyValue(n).trim();
+  const line = (key, c, w) => `<polyline fill="none" stroke="${c}" stroke-width="${w}" points="${pts.map(p => X(+p.date).toFixed(1) + ',' + Y(p.stats[key]).toFixed(1)).join(' ')}"/>` +
+    pts.map(p => `<circle cx="${X(+p.date).toFixed(1)}" cy="${Y(p.stats[key]).toFixed(1)}" r="3" fill="${c}"/>`).join('');
+  let grid = '';
+  for (let k = 0; k <= 4; k++) {
+    const v = ymax / 4 * k;
+    grid += `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="${col('--line')}"/>` +
+      `<text x="${P.l - 6}" y="${Y(v) + 4}" text-anchor="end" font-size="11" fill="${col('--muted')}">${v.toFixed(0)}</text>`;
+  }
+  const y0 = new Date(t0).getUTCFullYear(), y1 = new Date(t1).getUTCFullYear();
+  for (let y = y0; y <= y1 + 1; y++) {
+    const t = Date.UTC(y, 0, 1); if (t < t0 || t > t1) continue;
+    grid += `<text x="${X(t)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="${col('--muted')}">${y}</text>`;
+  }
+  svg.innerHTML = grid + line('bareHa', col('--bare'), 2) + line('dryHa', col('--dry'), 2) + line('affHa', col('--text'), 2.5) +
+    `<line id="chartCursor" y1="${P.t}" y2="${H - P.b}" stroke="${col('--accent')}" stroke-dasharray="3 3"/>`;
+  svg._X = X;
+}
+function highlightChart() {
+  const c = document.getElementById('chartCursor'); const svg = $('chart');
+  if (!c || !svg._X || !visible.length) return;
+  const x = svg._X(+entries[visible[cur]].date); c.setAttribute('x1', x); c.setAttribute('x2', x);
+}
+
+// ---------- Main flow ----------
+async function analyzeAll() {
+  analysisOK = true;
+  let done = 0;
+  const z = ANALYSIS_ZOOM, b = analysisBounds;
+  await pool(entries, 3, async e => {
+    try {
+      const f = await grabFrame(e.rel, b, z);
+      // Real bounds of the pixel grid (rounded to whole pixels)
+      f.bounds = b;
+      frames.set(e.rel, f);
+    } catch (err) {
+      console.warn('Analysis failed', e.wayback, err);
+      if (String(err).includes('Security') || String(err).includes('tainted')) analysisOK = false;
+    }
+    done++;
+    setStatus(`Analizando imágenes ${done}/${entries.length}…`, 0.5 + 0.5 * done / entries.length);
+    if (done % 3 === 0 || done === entries.length) recompute();
+  });
+  if (!frames.size) analysisOK = false;
+  recompute();
+  const valid = entries.filter(e => !e.rejected).length;
+  setStatus(analysisOK
+    ? `${entries.length} fechas únicas desde ${isoDate(SINCE)}; ${valid} sin nubes, ${entries.length - valid} descartadas.`
+    : `No se pudieron analizar los píxeles (el navegador bloqueó el acceso). Se muestran todas las fechas sin filtrar.`, 1);
+}
+
+async function main() {
+  syncThresholdLabels();
+  let cfg;
+  try { cfg = await fetchJSON(CONFIG_URL); }
+  catch (e) { setStatus('No se pudo descargar la lista de versiones Wayback: ' + e.message); return; }
+
+  let releases = Object.entries(cfg).map(([rel, v]) => {
+    const m = /(\d{4}-\d{2}-\d{2})/.exec(v.itemTitle || '');
+    return { rel, metadataLayerUrl: v.metadataLayerUrl, wayback: m ? m[1] : v.itemTitle, wbDate: m ? new Date(m[1]) : null };
+  }).filter(r => r.wbDate && r.wbDate >= SINCE).sort((a, b) => a.wbDate - b.wbDate);
+  // A release published after SINCE may still carry older imagery; capture date is checked below.
+
+  setStatus(`Consultando fecha de captura en ${releases.length} versiones…`, 0);
+  let done = 0;
+  const center = analysisBounds.getCenter();
+  const infos = await pool(releases, 6, async r => {
+    let info = null;
+    try { info = parseCapture(await queryCaptureInfo(r, center.lat, center.lng)); } catch (e) { /* ignore */ }
+    done++; setStatus(`Consultando fecha de captura ${done}/${releases.length}…`, 0.5 * done / releases.length);
+    return info;
+  });
+
+  const byDate = new Map();
+  releases.forEach((r, i) => {
+    const info = infos[i]; if (!info || info.date < SINCE) return;
+    const key = isoDate(info.date);
+    if (!byDate.has(key)) byDate.set(key, { ...r, ...info });  // keep earliest release with this capture
+  });
+  entries = [...byDate.values()].sort((a, b) => a.date - b.date);
+  if (!entries.length) { setStatus('No se encontraron imágenes con fecha de captura en el periodo.'); return; }
+  analysisOK = true;
+  recompute();
+  await analyzeAll();
+}
+
+// ---------- UI wiring ----------
+$('slider').addEventListener('input', e => show(+e.target.value));
+$('prev').addEventListener('click', () => show(cur - 1));
+$('next').addEventListener('click', () => show(cur + 1));
+$('play').addEventListener('click', () => {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; $('play').textContent = '▶ Reproducir'; return; }
+  $('play').textContent = '⏸ Pausar';
+  if (cur >= visible.length - 1) show(0);
+  playTimer = setInterval(() => { if (cur >= visible.length - 1) $('play').click(); else show(cur + 1); }, 1500);
+});
+['tHueVeg', 'tHueDry', 'tCloudLum', 'tMaxCloud'].forEach(id => $(id).addEventListener('input', () => { syncThresholdLabels(); recompute(); }));
+$('showMask').addEventListener('change', updateMask);
+$('showRejected').addEventListener('change', recompute);
+$('resetView').addEventListener('click', () => map.fitBounds(analysisBounds));
+$('useView').addEventListener('click', async () => {
+  analysisBounds = map.getBounds();
+  map.removeLayer(frameRect);
+  frameRect = L.rectangle(analysisBounds, { color: '#ffd43b', weight: 1.5, fill: false, dashArray: '5 5' }).addTo(map);
+  frames.clear(); recompute(); await analyzeAll();
+});
+$('csv').addEventListener('click', () => {
+  const rows = [['fecha_captura', 'version_wayback', 'release', 'resolucion_m', 'fuente', 'nubes_pct', 'desnudo_ha', 'seca_ha', 'afectado_ha', 'estado']];
+  for (const e of entries) {
+    const s = e.stats;
+    rows.push([isoDate(e.date), e.wayback, e.rel, e.res ?? '', e.provider, s ? s.cloudPct.toFixed(2) : '', s ? s.bareHa.toFixed(2) : '',
+      s ? s.dryHa.toFixed(2) : '', s ? s.affHa.toFixed(2) : '', !s ? 'sin_analisis' : e.rejected ? 'descartada' : 'valida']);
+  }
+  const csv = rows.map(r => r.map(v => /[",]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'mombacho_timelapse.csv'; a.click();
+});
+window.addEventListener('resize', () => { renderChart(); highlightChart(); });
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  if (e.key === 'ArrowLeft') show(cur - 1); else if (e.key === 'ArrowRight') show(cur + 1);
+});
+
+main();
+})();
+</script>
+</body>
+</html>
