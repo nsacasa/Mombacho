@@ -36,6 +36,7 @@ button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:7p
 button.secondary{background:transparent;color:var(--text);border:1px solid var(--line)}
 button:disabled{opacity:.5;cursor:default}
 #dateLabel{font-weight:600;min-width:110px}
+.range input[type=date],.range select{font:inherit;font-size:.85rem;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text)}
 #status{color:var(--muted);font-size:.85rem;margin-top:8px;min-height:1.2em}
 .progress{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:6px}
 .progress>div{height:100%;width:0;background:var(--accent);transition:width .2s}
@@ -68,12 +69,27 @@ tr{cursor:pointer}
 </head>
 <body>
 <header>
-  <h1>Volcán Mombacho: timelapse satelital (últimos 7 años)</h1>
+  <h1>Volcán Mombacho: timelapse satelital</h1>
   <p>Imágenes históricas de Esri World Imagery Wayback, ordenadas por fecha de captura. Se descartan automáticamente las fechas con nubes sobre la zona de análisis.</p>
 </header>
 <main>
   <section class="card">
     <div id="map" role="img" aria-label="Mapa satelital del volcán Mombacho"></div>
+    <div class="controls range">
+      <span class="small"><b>Periodo:</b></span>
+      <label class="small">Desde <input type="date" id="dFrom"></label>
+      <label class="small">Hasta <input type="date" id="dTo"></label>
+      <select id="preset" aria-label="Periodo rápido">
+        <option value="">Rápido…</option>
+        <option value="1">Último año</option>
+        <option value="3">Últimos 3 años</option>
+        <option value="5">Últimos 5 años</option>
+        <option value="7">Últimos 7 años</option>
+        <option value="10">Últimos 10 años</option>
+        <option value="all">Todo el archivo (desde 2014)</option>
+      </select>
+      <button id="applyRange" class="secondary">Aplicar</button>
+    </div>
     <div class="controls">
       <button id="play" disabled>▶ Reproducir</button>
       <button id="prev" class="secondary" disabled aria-label="Anterior">◀</button>
@@ -145,12 +161,18 @@ tr{cursor:pointer}
 const params = new URLSearchParams(location.search);
 const CENTER = [parseFloat(params.get('lat')) || 11.8264, parseFloat(params.get('lon')) || -85.9681]; // Mombacho summit
 const FRAME_KM = parseFloat(params.get('km')) || 2.6;   // width/height of the analysis frame
-const YEARS = parseFloat(params.get('years')) || 7;
+const DEFAULT_YEARS = 7;
+const yearsAgo = y => new Date(Date.now() - y * 365.25 * 864e5);
+const parseDay = v => { const d = v && new Date(v + 'T00:00:00Z'); return d && !isNaN(d) ? d : null; };
 const ANALYSIS_ZOOM = 16;                               // ~2.3 m/px, enough for area estimates
 const CONFIG_URL = 'https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json';
 const TILE_URL = (rel, z, y, x) =>
   `https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/${rel}/${z}/${y}/${x}`;
-const SINCE = new Date(Date.now() - YEARS * 365.25 * 864e5);
+// Date range (editable in the UI; also accepted as ?from=YYYY-MM-DD&to=YYYY-MM-DD or ?years=N)
+const range = {
+  from: parseDay(params.get('from')) || yearsAgo(parseFloat(params.get('years')) || DEFAULT_YEARS),
+  to: parseDay(params.get('to')) || new Date(),
+};
 
 const $ = id => document.getElementById(id);
 const statusEl = $('status'), bar = $('bar');
@@ -456,68 +478,108 @@ function highlightChart() {
 }
 
 // ---------- Main flow ----------
-async function analyzeAll() {
+let allReleases = [];          // every Wayback release, sorted by publication date
+const infoCache = new Map();   // release -> capture info (or null)
+let runId = 0;                 // cancels stale loads when the range changes
+
+async function analyzeAll(myRun) {
   analysisOK = true;
+  const todo = entries.filter(e => !frames.has(e.rel));
   let done = 0;
   const z = ANALYSIS_ZOOM, b = analysisBounds;
-  await pool(entries, 3, async e => {
+  await pool(todo, 3, async e => {
+    if (myRun !== runId) return;
     try {
       const f = await grabFrame(e.rel, b, z);
-      // Real bounds of the pixel grid (rounded to whole pixels)
       f.bounds = b;
-      frames.set(e.rel, f);
+      if (b === analysisBounds) frames.set(e.rel, f);
     } catch (err) {
       console.warn('Analysis failed', e.wayback, err);
       if (String(err).includes('Security') || String(err).includes('tainted')) analysisOK = false;
     }
     done++;
-    setStatus(`Analizando imágenes ${done}/${entries.length}…`, 0.5 + 0.5 * done / entries.length);
-    if (done % 3 === 0 || done === entries.length) recompute();
+    if (myRun !== runId) return;
+    setStatus(`Analizando imágenes ${done}/${todo.length}…`, 0.5 + 0.5 * done / todo.length);
+    if (done % 3 === 0 || done === todo.length) recompute();
   });
+  if (myRun !== runId) return;
   if (!frames.size) analysisOK = false;
   recompute();
   const valid = entries.filter(e => !e.rejected).length;
   setStatus(analysisOK
-    ? `${entries.length} fechas únicas desde ${isoDate(SINCE)}; ${valid} sin nubes, ${entries.length - valid} descartadas.`
+    ? `${entries.length} fechas únicas entre ${isoDate(range.from)} y ${isoDate(range.to)}; ${valid} sin nubes, ${entries.length - valid} descartadas.`
     : `No se pudieron analizar los píxeles (el navegador bloqueó el acceso). Se muestran todas las fechas sin filtrar.`, 1);
+}
+
+async function loadRange() {
+  const myRun = ++runId;
+  if (playTimer) $('play').click();
+  // A release published before `from` cannot contain imagery captured after `from`.
+  const releases = allReleases.filter(r => r.wbDate >= range.from);
+  const missing = releases.filter(r => !infoCache.has(r.rel));
+  let done = 0;
+  const center = analysisBounds.getCenter();
+  setStatus(missing.length ? `Consultando fecha de captura en ${missing.length} versiones…` : 'Actualizando periodo…', 0);
+  await pool(missing, 6, async r => {
+    let info = null;
+    try { info = parseCapture(await queryCaptureInfo(r, center.lat, center.lng)); } catch (e) { /* ignore */ }
+    infoCache.set(r.rel, info);
+    done++;
+    if (myRun === runId) setStatus(`Consultando fecha de captura ${done}/${missing.length}…`, 0.5 * done / missing.length);
+  });
+  if (myRun !== runId) return;
+
+  const byDate = new Map();
+  for (const r of releases) {
+    const info = infoCache.get(r.rel);
+    if (!info || info.date < range.from || info.date > range.to) continue;
+    const key = isoDate(info.date);
+    if (!byDate.has(key)) byDate.set(key, { ...r, ...info });  // keep earliest release with this capture
+  }
+  entries = [...byDate.values()].sort((a, b) => a.date - b.date);
+  visible = []; cur = 0;
+  recompute();
+  if (!entries.length) { setStatus(`No hay imágenes con fecha de captura entre ${isoDate(range.from)} y ${isoDate(range.to)}.`, 1); return; }
+  await analyzeAll(myRun);
 }
 
 async function main() {
   syncThresholdLabels();
+  syncRangeInputs();
   let cfg;
   try { cfg = await fetchJSON(CONFIG_URL); }
   catch (e) { setStatus('No se pudo descargar la lista de versiones Wayback: ' + e.message); return; }
-
-  let releases = Object.entries(cfg).map(([rel, v]) => {
+  allReleases = Object.entries(cfg).map(([rel, v]) => {
     const m = /(\d{4}-\d{2}-\d{2})/.exec(v.itemTitle || '');
     return { rel, metadataLayerUrl: v.metadataLayerUrl, wayback: m ? m[1] : v.itemTitle, wbDate: m ? new Date(m[1]) : null };
-  }).filter(r => r.wbDate && r.wbDate >= SINCE).sort((a, b) => a.wbDate - b.wbDate);
-  // A release published after SINCE may still carry older imagery; capture date is checked below.
-
-  setStatus(`Consultando fecha de captura en ${releases.length} versiones…`, 0);
-  let done = 0;
-  const center = analysisBounds.getCenter();
-  const infos = await pool(releases, 6, async r => {
-    let info = null;
-    try { info = parseCapture(await queryCaptureInfo(r, center.lat, center.lng)); } catch (e) { /* ignore */ }
-    done++; setStatus(`Consultando fecha de captura ${done}/${releases.length}…`, 0.5 * done / releases.length);
-    return info;
-  });
-
-  const byDate = new Map();
-  releases.forEach((r, i) => {
-    const info = infos[i]; if (!info || info.date < SINCE) return;
-    const key = isoDate(info.date);
-    if (!byDate.has(key)) byDate.set(key, { ...r, ...info });  // keep earliest release with this capture
-  });
-  entries = [...byDate.values()].sort((a, b) => a.date - b.date);
-  if (!entries.length) { setStatus('No se encontraron imágenes con fecha de captura en el periodo.'); return; }
-  analysisOK = true;
-  recompute();
-  await analyzeAll();
+  }).filter(r => r.wbDate).sort((a, b) => a.wbDate - b.wbDate);
+  if (allReleases.length) $('dFrom').min = $('dTo').min = isoDate(allReleases[0].wbDate).slice(0, 4) + '-01-01';
+  await loadRange();
 }
 
 // ---------- UI wiring ----------
+function syncRangeInputs() {
+  $('dFrom').value = isoDate(range.from); $('dTo').value = isoDate(range.to);
+  $('dFrom').max = $('dTo').max = isoDate(new Date());
+}
+function applyRange() {
+  const f = parseDay($('dFrom').value), t = parseDay($('dTo').value);
+  if (!f || !t) { setStatus('Selecciona una fecha válida en “Desde” y “Hasta”.'); return; }
+  if (f > t) { setStatus('La fecha “Desde” debe ser anterior a “Hasta”.'); return; }
+  range.from = f; range.to = new Date(+t + 864e5 - 1);   // include the whole "to" day
+  const q = new URLSearchParams(location.search);
+  q.delete('years'); q.set('from', isoDate(f)); q.set('to', isoDate(t));
+  try { history.replaceState(null, '', '?' + q.toString()); } catch (e) { /* file:// may refuse */ }
+  if (allReleases.length) loadRange();
+}
+$('applyRange').addEventListener('click', applyRange);
+$('preset').addEventListener('change', e => {
+  const v = e.target.value; if (!v) return;
+  range.from = v === 'all' ? new Date(Date.UTC(2014, 0, 1)) : yearsAgo(+v);
+  range.to = new Date();
+  syncRangeInputs(); e.target.value = ''; applyRange();
+});
+['dFrom', 'dTo'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') applyRange(); }));
 $('slider').addEventListener('input', e => show(+e.target.value));
 $('prev').addEventListener('click', () => show(cur - 1));
 $('next').addEventListener('click', () => show(cur + 1));
@@ -535,7 +597,7 @@ $('useView').addEventListener('click', async () => {
   analysisBounds = map.getBounds();
   map.removeLayer(frameRect);
   frameRect = L.rectangle(analysisBounds, { color: '#ffd43b', weight: 1.5, fill: false, dashArray: '5 5' }).addTo(map);
-  frames.clear(); recompute(); await analyzeAll();
+  frames.clear(); recompute(); await analyzeAll(++runId);
 });
 $('csv').addEventListener('click', () => {
   const rows = [['fecha_captura', 'version_wayback', 'release', 'resolucion_m', 'fuente', 'nubes_pct', 'desnudo_ha', 'seca_ha', 'afectado_ha', 'estado']];
